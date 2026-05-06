@@ -1,33 +1,20 @@
 import json
 import os
-from dotenv import load_dotenv
+import sqlite3
+from html import escape
 from pathlib import Path
 
-env_path = Path('.') / '.env'
-load_dotenv(dotenv_path=env_path)
-
-api_key = os.getenv("GEMINI_API_KEY")
-print(f"Sistem Kontrolü - API Key Yüklendi mi?: {bool(api_key)}")
-
-
-os.environ["GOOGLE_API_USE_MTLS"] = "never"
-
-from html import escape
-from importlib import import_module
-
+from dotenv import load_dotenv
 from google import genai
-import streamlit as st
 import plotly.graph_objects as go
-import sqlite3
-
-try:
-	load_dotenv = import_module("dotenv").load_dotenv
-except Exception:
-	def load_dotenv() -> bool:
-		return False
+import streamlit as st
 
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "cockle_cache.db"
+
+load_dotenv(BASE_DIR / ".env")
+os.environ.setdefault("GOOGLE_API_USE_MTLS", "never")
 
 
 st.set_page_config(page_title="Cockle", page_icon="", layout="wide")
@@ -122,12 +109,11 @@ st.markdown(
 
 
 def init_db():
-	conn = sqlite3.connect("cockle_cache.db")
-	c = conn.cursor()
-	c.execute('''CREATE TABLE IF NOT EXISTS searches
-				 (query TEXT PRIMARY KEY, response_json TEXT)''')
-	conn.commit()
-	conn.close()
+	with sqlite3.connect(DB_PATH) as conn:
+		conn.execute(
+			"""CREATE TABLE IF NOT EXISTS searches
+				 (query TEXT PRIMARY KEY, response_json TEXT)"""
+		)
 
 init_db()
 
@@ -183,7 +169,6 @@ def _format_api_error(exc: Exception) -> str:
 
 
 def _resolve_api_key() -> str:
-	secret_key = ""
 	try:
 		secret_key = (st.secrets.get("GEMINI_API_KEY") or "").strip()
 	except Exception:
@@ -191,6 +176,10 @@ def _resolve_api_key() -> str:
 	if secret_key:
 		return secret_key
 	return os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def _escape_html_text(value: object, fallback: str = "") -> str:
+	return escape(_extract_text(value, fallback))
 
 
 PREFERRED_MODELS = [
@@ -261,11 +250,11 @@ def build_comparative_content(
 		return _default_payload(phrase, "Configuration missing.")
 
 	try:
-		conn = sqlite3.connect("cockle_cache.db")
-		c = conn.cursor()
-		c.execute("SELECT response_json FROM searches WHERE query=?", (phrase,))
-		row = c.fetchone()
-		conn.close()
+		with sqlite3.connect(DB_PATH) as conn:
+			row = conn.execute(
+				"SELECT response_json FROM searches WHERE query=?",
+				(phrase,),
+			).fetchone()
 		if row:
 			content = json.loads(row[0])
 			content["cached"] = True
@@ -281,7 +270,7 @@ def build_comparative_content(
 				"key_differences": content.get("key_differences", []),
 				"metrics": content.get("metrics", _default_payload("", "")["metrics"]),
 			}
-	except Exception as e:
+	except Exception:
 		pass
 
 	prompt = f"""
@@ -300,11 +289,11 @@ Return ONLY a JSON object exactly like this: {{"en_context": "...", "es_text": "
 		response_text = _generate_with_sdk(api_key, prompt)
 		content = json.loads(extract_json(response_text))
 		try:
-			conn = sqlite3.connect("cockle_cache.db")
-			c = conn.cursor()
-			c.execute("INSERT OR REPLACE INTO searches (query, response_json) VALUES (?, ?)", (phrase, json.dumps(content)))
-			conn.commit()
-			conn.close()
+			with sqlite3.connect(DB_PATH) as conn:
+				conn.execute(
+					"INSERT OR REPLACE INTO searches (query, response_json) VALUES (?, ?)",
+					(phrase, json.dumps(content)),
+				)
 		except Exception:
 			pass
 		
@@ -345,11 +334,18 @@ try:
 		if key in ["metrics", "danger_alert", "etymology", "cached", "key_differences"]:
 			safe_content[key] = value
 		else:
-			safe_content[key] = escape(str(value))
+				safe_content[key] = _escape_html_text(value)
 
 	alert = safe_content.get("danger_alert", {})
 	if alert.get("is_risky"):
-		st.error(f"⚠️ **COGNITIVE TRAP DETECTED:** {escape(str(alert.get('warning', '')))}")
+			st.error(f"⚠️ **COGNITIVE TRAP DETECTED:** {_escape_html_text(alert.get('warning', ''))}")
+
+		display_content = {
+			"en_context": _escape_html_text(content.get("en_context"), "No English context generated."),
+			"es_text": _escape_html_text(content.get("es_text"), "No Spanish text generated."),
+			"it_text": _escape_html_text(content.get("it_text"), "No Italian text generated."),
+			"contrast_analysis": _escape_html_text(content.get("contrast_analysis"), "No contrast analysis generated."),
+		}
 
 	col1, col2, col3 = st.columns(3)
 
@@ -358,7 +354,7 @@ try:
 		st.markdown(
 			f"""
 			<div class="cockle-shell">
-				<p>{safe_content['en_context']}</p>
+				<p>{display_content['en_context']}</p>
 			</div>
 			""",
 			unsafe_allow_html=True,
@@ -369,7 +365,7 @@ try:
 		st.markdown(
 			f"""
 			<div class="cockle-shell">
-				<p>{safe_content['es_text']}</p>
+				<p>{display_content['es_text']}</p>
 			</div>
 			""",
 			unsafe_allow_html=True,
@@ -380,7 +376,7 @@ try:
 		st.markdown(
 			f"""
 			<div class="cockle-shell">
-				<p>{safe_content['it_text']}</p>
+				<p>{display_content['it_text']}</p>
 			</div>
 			""",
 			unsafe_allow_html=True,
@@ -439,7 +435,7 @@ try:
 		f"""
 		<div class="analysis-box">
 			<h4>⚠️ Contrast &amp; Interference Analysis</h4>
-			<p>{safe_content['contrast_analysis']}</p>
+			<p>{display_content['contrast_analysis']}</p>
 		</div>
 		""",
 		unsafe_allow_html=True,

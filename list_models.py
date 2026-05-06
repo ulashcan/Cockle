@@ -1,24 +1,40 @@
 import os
+from pathlib import Path
+
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
+
+def _resolve_api_key() -> str:
+    return os.getenv("GEMINI_API_KEY", "").strip()
+
+
+api_key = _resolve_api_key()
 if not api_key:
-    print("Error: GEMINI_API_KEY not found in .env")
-    exit(1)
+    raise SystemExit("Error: GEMINI_API_KEY not found.")
 
-url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 
-print(f"Fetching models from {url[:60]}...[REDACTED]")
-response = requests.get(url)
+try:
+    response = requests.get(
+        endpoint,
+        params={"key": api_key},
+        timeout=10,
+    )
+    response.raise_for_status()
+except requests.RequestException as exc:
+    raise SystemExit(f"Error fetching models: {type(exc).__name__}") from exc
 
-if response.status_code == 200:
+try:
     data = response.json()
-    models = data.get("models", [])
-    print(f"\nFound {len(models)} models. Available names:")
-    for m in models:
-        print(f"- {m.get('name')}")
-else:
-    print(f"Error {response.status_code}: {response.text}")
+except ValueError as exc:
+    raise SystemExit("Error fetching models: invalid JSON response") from exc
+
+models = data.get("models", [])
+print(f"Found {len(models)} models. Available names:")
+for model in models:
+    print(f"- {model.get('name')}")
